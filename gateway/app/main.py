@@ -45,12 +45,13 @@ async def lifespan(app: FastAPI):
     node_manager = NodeManager(settings.nodes)
     node_client = NodeClient(http, settings.cluster_secret, settings.max_retries)
     app.state.node_manager = node_manager
-    app.state.cache_service = CacheService(NodeRouter(node_manager), node_client)
+    router = NodeRouter(node_manager, settings.virtual_nodes)
+    app.state.cache_service = CacheService(router, node_client)
 
     logger.info(
-        "Gateway starting on %s:%d with %d configured node(s): %s",
+        "Gateway starting on %s:%d with %d configured node(s): %s (hash ring: %d points)",
         settings.host, settings.port, len(node_manager),
-        ", ".join(n.node_id for n in node_manager.all()),
+        ", ".join(n.node_id for n in node_manager.all()), len(router.ring),
     )
     try:
         yield

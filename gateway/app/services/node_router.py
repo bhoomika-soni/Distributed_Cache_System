@@ -1,18 +1,22 @@
-"""Decides which node is responsible for a key.
+"""Decides which node is responsible for a key, using a consistent hash ring.
 
-Phase 4: every key goes to the FIRST configured node. That is intentionally
-simple - it gives us a working end-to-end path. Phase 5 replaces the body of
-`route()` with a consistent-hash ring; nothing else in the gateway changes,
-because everything calls through this one method.
+The ring is built once from the node registry. Phase 6 uses `ring.get_nodes()`
+to pick replicas, and Phase 7 passes it the set of healthy nodes so requests
+skip failed nodes.
 """
 from __future__ import annotations
 
+from app.services.consistent_hash import HashRing
 from app.services.node_manager import NodeInfo, NodeManager
 
 
 class NodeRouter:
-    def __init__(self, nodes: NodeManager) -> None:
+    def __init__(self, nodes: NodeManager, virtual_nodes: int) -> None:
         self._nodes = nodes
+        self.ring = HashRing(virtual_nodes)
+        for node in nodes.all():
+            self.ring.add_node(node.node_id)
 
     def route(self, key: str) -> NodeInfo:
-        return self._nodes.all()[0]
+        """The primary node for `key`."""
+        return self._nodes.get(self.ring.get_node(key))

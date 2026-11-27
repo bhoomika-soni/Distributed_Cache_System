@@ -40,11 +40,12 @@ def test_set_and_get_roundtrip_through_the_gateway(client):
     r = client.post("/cache", json={"key": key, "value": value, "ttl": 60})
     assert r.status_code == 201
     body = r.json()
-    assert body["created"] is True and body["version"] == 1 and body["node_id"] == "node-1"
+    assert body["created"] is True and body["version"] == 1
+    assert body["node_id"] in ("node-1", "node-2")  # which one is decided by the hash ring
 
     got = client.get(path(key)).json()
     assert got["value"] == value and got["version"] == 1
-    assert 0 < got["ttl_seconds"] <= 60 and got["node_id"] == "node-1"
+    assert 0 < got["ttl_seconds"] <= 60 and got["node_id"] == body["node_id"]
 
 
 def test_overwrite_returns_200_and_bumps_version(client):

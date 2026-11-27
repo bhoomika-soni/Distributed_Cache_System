@@ -27,6 +27,19 @@ def client(cluster):
 
 
 @pytest.fixture(scope="module")
+def three_node_cluster():
+    """Three real cache nodes + a gateway (used by the hash-routing tests)."""
+    with running_cluster(node_count=3) as c:
+        yield c
+
+
+@pytest.fixture
+def three_node_client(three_node_cluster):
+    with httpx.Client(base_url=three_node_cluster.gateway_url, timeout=10) as c:
+        yield c
+
+
+@pytest.fixture(scope="module")
 def dead_node_client():
     """Gateway whose only node does not exist (nothing listens on that port)."""
     # Short timeout: on Windows a closed port can take the full timeout to fail.
