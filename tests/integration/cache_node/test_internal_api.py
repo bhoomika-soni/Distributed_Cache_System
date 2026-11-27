@@ -15,6 +15,9 @@ ENDPOINTS = [
     ("DELETE", "/internal/cache/delete/k", None),
     ("GET", "/internal/cache/exists/k", None),
     ("GET", "/internal/cache/ttl/k", None),
+    ("GET", "/internal/replication/stats", None),
+    ("POST", "/internal/replication/apply",
+     {"op": "delete", "key": "k", "version": 1, "origin": "n", "sent_at": 1.0}),
 ]
 
 
@@ -166,3 +169,127 @@ def test_malformed_json_is_422(client):
         headers={"Content-Type": "application/json"},
     )
     assert r.status_code == 422
+
+
+# ------------------------------------------------------- replication (Phase 6)
+UNREACHABLE = {"node_id": "ghost", "url": "http://127.0.0.1:1"}  # nothing listens on port 1
+
+
+def stats(client):
+    return client.get("/internal/replication/stats").json()
+
+
+def apply(client, **payload):
+    return client.post("/internal/replication/apply", json=payload)
+
+
+def wait_for(predicate, timeout=5.0):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def test_set_without_replicas_schedules_no_replication(client):
+    body = put(client, "k").json()
+    assert body["replicas_scheduled"] == []
+    assert stats(client)["sent"]["scheduled"] == 0
+
+
+def test_set_reports_the_replicas_it_scheduled_without_waiting_for_them(client):
+    started = time.time()
+    r = put(client, "k", replicas=[UNREACHABLE])
+    assert r.status_code == 200 and r.json()["replicas_scheduled"] == ["ghost"]
+    assert time.time() - started < 0.25  # asynchronous: the client does not wait for the replica
+    assert stats(client)["sent"]["scheduled"] == 1
+
+
+def test_unreachable_replica_is_recorded_as_a_failure_not_dropped(client):
+    put(client, "k", "v", replicas=[UNREACHABLE])
+    assert wait_for(lambda: stats(client)["sent"]["failed"] == 1), "failure was never recorded"
+
+    s = stats(client)
+    failure = s["recent_failures"][0]
+    assert (failure["op"], failure["key"], failure["version"], failure["target"]) == (
+        "set", "k", 1, "ghost")
+    assert failure["attempts"] == 2  # REPLICATION_RETRIES=1 in these tests: 1 try + 1 retry
+    assert s["sent"]["succeeded"] == 0 and s["sent"]["retries"] == 1
+    assert s["sent"]["in_flight"] == 0
+    # the primary's own copy is unaffected by the failed replication
+    assert client.get("/internal/cache/get/k").json()["value"] == "v"
+
+
+def test_delete_with_replicas_replicates_only_real_deletes(client):
+    put(client, "k")
+    r = client.request("DELETE", "/internal/cache/delete/k", json={"replicas": [UNREACHABLE]})
+    assert r.json() == {"key": "k", "deleted": True, "replicas_scheduled": ["ghost"]}
+
+    missing = client.request("DELETE", "/internal/cache/delete/nope", json={"replicas": [UNREACHABLE]})
+    assert missing.json()["deleted"] is False and missing.json()["replicas_scheduled"] == []
+
+
+def test_invalid_replica_targets_are_422(client):
+    for bad in ([{"node_id": "", "url": "http://h"}], [{"node_id": "n", "url": "ftp://h"}], [{"node_id": "n"}]):
+        assert put(client, "k", replicas=bad).status_code == 422
+
+
+def test_apply_stores_the_primarys_version_and_absolute_expiry(client):
+    expires_at = time.time() + 100
+    r = apply(client, op="set", key="k", value={"a": 1}, version=7, created_at=time.time() - 5,
+              expires_at=expires_at, origin="node-1", sent_at=time.time())
+    assert r.status_code == 200
+    assert r.json() == {"applied": True, "reason": "applied", "version": 7}
+
+    got = client.get("/internal/cache/get/k").json()
+    assert got["version"] == 7 and got["value"] == {"a": 1}
+    assert got["expires_at"] == expires_at  # not restarted from receipt time
+
+
+def test_apply_ignores_stale_versions_and_blocks_resurrection(client):
+    base = dict(key="k", origin="node-1", sent_at=time.time())
+    apply(client, op="set", value="v5", version=5, created_at=1.0, **base)
+
+    stale = apply(client, op="set", value="old", version=3, created_at=1.0, **base).json()
+    assert stale == {"applied": False, "reason": "stale", "version": 5}
+
+    assert apply(client, op="delete", version=6, **base).json()["applied"] is True
+    assert client.get("/internal/cache/get/k").status_code == 404
+    zombie = apply(client, op="set", value="zombie", version=4, created_at=1.0, **base).json()
+    assert zombie["reason"] == "stale"
+    assert client.get("/internal/cache/get/k").status_code == 404
+
+
+def test_primary_continues_numbering_after_a_delete(client):
+    assert put(client, "k").json()["version"] == 1
+    client.delete("/internal/cache/delete/k")
+    assert put(client, "k").json()["version"] == 3  # 1 = set, 2 = delete, 3 = new set
+
+
+def test_apply_counts_what_it_received_and_never_forwards(client):
+    base = dict(key="k", origin="node-1", sent_at=time.time() - 0.2)
+    apply(client, op="set", value=1, version=2, created_at=1.0, **base)  # applied
+    apply(client, op="set", value=1, version=2, created_at=1.0, **base)  # duplicate -> stale
+    apply(client, op="set", value=1, version=9, created_at=1.0, expires_at=time.time() - 1, **base)  # expired
+
+    s = stats(client)
+    assert s["received"]["total"] == 3
+    assert (s["received"]["applied"], s["received"]["ignored_stale"], s["received"]["ignored_expired"]) == (1, 1, 1)
+    assert s["received"]["last_lag_seconds"] >= 0.2
+    assert s["sent"]["scheduled"] == 0  # a replica never replicates onward
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"op": "set", "key": "k", "version": 1, "origin": "n", "sent_at": 1.0, "created_at": 1.0},
+        {"op": "set", "key": "k", "version": 1, "origin": "n", "sent_at": 1.0, "value": 1},
+        {"op": "delete", "key": "k", "version": 1, "origin": "n", "sent_at": 1.0, "value": 1},
+        {"op": "merge", "key": "k", "version": 1, "origin": "n", "sent_at": 1.0},
+        {"op": "delete", "key": "k", "version": 0, "origin": "n", "sent_at": 1.0},
+        {"op": "delete", "key": "", "version": 1, "origin": "n", "sent_at": 1.0},
+    ],
+)
+def test_malformed_replication_messages_are_422(client, payload):
+    assert client.post("/internal/replication/apply", json=payload).status_code == 422

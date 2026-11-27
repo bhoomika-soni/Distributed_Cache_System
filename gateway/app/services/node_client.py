@@ -24,7 +24,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Sequence
 from urllib.parse import quote
 
 import httpx
@@ -71,10 +71,14 @@ class NodeClient:
         self._backoff_base = backoff_base
 
     # ------------------------------------------------------------ operations
-    async def set(self, node: NodeInfo, key: str, value: Any, ttl: float | None) -> dict:
+    async def set(
+        self, node: NodeInfo, key: str, value: Any, ttl: float | None,
+        replicas: Sequence[NodeInfo] = (),
+    ) -> dict:
+        """`node` is the primary; it replicates to `replicas` in the background."""
         resp = await self._send(
-            node, "POST", "/internal/cache/set",
-            idempotent=False, json={"key": key, "value": value, "ttl": ttl},
+            node, "POST", "/internal/cache/set", idempotent=False,
+            json={"key": key, "value": value, "ttl": ttl, "replicas": _targets(replicas)},
         )
         return self._ok_json(node, resp)
 
@@ -85,8 +89,11 @@ class NodeClient:
             return None
         return self._ok_json(node, resp)
 
-    async def delete(self, node: NodeInfo, key: str) -> dict:
-        resp = await self._send(node, "DELETE", f"/internal/cache/delete/{_enc(key)}", idempotent=True)
+    async def delete(self, node: NodeInfo, key: str, replicas: Sequence[NodeInfo] = ()) -> dict:
+        body = {"replicas": _targets(replicas)} if replicas else None
+        resp = await self._send(
+            node, "DELETE", f"/internal/cache/delete/{_enc(key)}", idempotent=True, json=body
+        )
         return self._ok_json(node, resp)
 
     async def exists(self, node: NodeInfo, key: str) -> dict:
@@ -151,6 +158,11 @@ class NodeClient:
             raise NodeResponseError(
                 node.node_id, resp.status_code, f"Node {node.node_id} returned invalid JSON"
             ) from exc
+
+
+def _targets(replicas: Sequence[NodeInfo]) -> list[dict]:
+    """Replica list in the wire format the node's SetRequest/DeleteRequest expects."""
+    return [{"node_id": r.node_id, "url": r.url} for r in replicas]
 
 
 def _enc(key: str) -> str:

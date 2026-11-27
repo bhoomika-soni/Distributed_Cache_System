@@ -72,3 +72,24 @@ def wrong_secret_client(cluster):
     with run_gateway(nodes, secret="not-the-nodes-secret") as gw:
         with httpx.Client(base_url=gw.url, timeout=15) as c:
             yield c
+
+
+@pytest.fixture(scope="module")
+def replicated_cluster():
+    """Three real nodes + a gateway with replication factor 3 (every node holds every key)."""
+    with running_cluster(node_count=3, replication_factor=3) as c:
+        yield c
+
+
+@pytest.fixture
+def replicated_client(replicated_cluster):
+    with httpx.Client(base_url=replicated_cluster.gateway_url, timeout=10) as c:
+        yield c
+
+
+@pytest.fixture(scope="module")
+def rf2_client(replicated_cluster):
+    """A SECOND gateway (replication factor 2) in front of the same three nodes."""
+    with run_gateway(replicated_cluster.node_urls, replication_factor=2) as gw:
+        with httpx.Client(base_url=gw.url, timeout=10) as c:
+            yield c

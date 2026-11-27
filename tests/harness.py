@@ -99,6 +99,8 @@ def run_node(node_id: str, secret: str = SECRET, capacity: int = 1000):
         "NODE_ID": node_id, "NODE_HOST": LOCALHOST, "NODE_PORT": str(port),
         "CLUSTER_SECRET": secret, "CACHE_CAPACITY": str(capacity),
         "TTL_CLEANUP_INTERVAL": "0.2",
+        # short timeout so a dead replica is detected quickly (even on Windows)
+        "REPLICATION_TIMEOUT": "1.0", "REPLICATION_RETRIES": "2",
     })
     try:
         url = f"http://{LOCALHOST}:{port}"
@@ -114,12 +116,13 @@ def run_gateway(
     secret: str = SECRET,
     request_timeout: float = 2.0,
     max_retries: int = 2,
+    replication_factor: int = 1,
 ):
     port = free_port()
     svc = Service("gateway", ROOT / "gateway", {
         "GATEWAY_HOST": LOCALHOST, "GATEWAY_PORT": str(port),
         "NODES": ",".join(f"{i}={u}" for i, u in nodes.items()),
-        "CLUSTER_SECRET": secret, "REPLICATION_FACTOR": "1",
+        "CLUSTER_SECRET": secret, "REPLICATION_FACTOR": str(replication_factor),
         "REQUEST_TIMEOUT": str(request_timeout), "MAX_RETRIES": str(max_retries),
     })
     try:
@@ -134,17 +137,22 @@ def run_gateway(
 class Cluster:
     gateway_url: str
     node_urls: dict[str, str]
+    node_services: dict[str, Service]  # so a test can stop() a node to simulate a crash
 
 
 @contextmanager
-def running_cluster(node_count: int = 2):
+def running_cluster(node_count: int = 2, replication_factor: int = 1):
     """N real cache nodes plus one gateway in front of them."""
     with ExitStack() as stack:
-        node_urls = {}
+        node_urls, node_services = {}, {}
         for i in range(1, node_count + 1):
-            node_urls[f"node-{i}"] = stack.enter_context(run_node(f"node-{i}")).url
-        gateway = stack.enter_context(run_gateway(node_urls))
-        yield Cluster(gateway.url, node_urls)
+            node = stack.enter_context(run_node(f"node-{i}"))
+            node_urls[f"node-{i}"] = node.url
+            node_services[f"node-{i}"] = node.service
+        gateway = stack.enter_context(
+            run_gateway(node_urls, replication_factor=replication_factor)
+        )
+        yield Cluster(gateway.url, node_urls, node_services)
 
 
 class HangingServer:
@@ -185,3 +193,16 @@ class HangingServer:
         for c in self._conns:
             c.close()
         self._sock.close()
+
+
+def wait_until(predicate, timeout: float = 10.0, interval: float = 0.05, what: str = "condition"):
+    """Poll until `predicate()` is truthy. Replication is asynchronous, so tests
+    wait for the cluster to converge instead of sleeping a fixed time."""
+    deadline = time.monotonic() + timeout
+    while True:
+        value = predicate()
+        if value:
+            return value
+        if time.monotonic() > deadline:
+            raise AssertionError(f"timed out after {timeout}s waiting for: {what}")
+        time.sleep(interval)

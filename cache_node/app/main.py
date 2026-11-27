@@ -5,6 +5,7 @@ import logging
 import time
 from contextlib import asynccontextmanager
 
+import httpx
 import uvicorn
 from fastapi import FastAPI, Request, status
 from fastapi.responses import JSONResponse
@@ -12,6 +13,7 @@ from fastapi.responses import JSONResponse
 from app.cache.cache_engine import CacheEngine
 from app.cache.ttl_manager import TTLCleaner
 from app.config import DEFAULT_SECRET, settings
+from app.replication.replication_manager import ReplicationManager
 from app.routes import internal_routes
 
 logging.basicConfig(
@@ -23,27 +25,43 @@ logger = logging.getLogger("cache_node")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Create the cache engine and start the background TTL cleaner on startup;
-    stop the cleaner on shutdown (graceful shutdown)."""
+    """Create the engine, the TTL cleaner and the replication manager on startup;
+    shut them down in order (graceful shutdown)."""
     app.state.started_at = time.time()
-    app.state.engine = CacheEngine(capacity=settings.capacity)
+    app.state.engine = CacheEngine(capacity=settings.capacity, tombstone_ttl=settings.tombstone_ttl)
     cleaner = TTLCleaner(app.state.engine, interval=settings.ttl_cleanup_interval)
     cleaner.start()
     app.state.cleaner = cleaner
 
+    # One shared client for all primary -> replica traffic (keeps connections alive).
+    http = httpx.AsyncClient(timeout=settings.replication_timeout)
+    app.state.replication = ReplicationManager(
+        node_id=settings.node_id,
+        http=http,
+        cluster_secret=settings.cluster_secret,
+        max_retries=settings.replication_retries,
+    )
+
     if settings.cluster_secret == DEFAULT_SECRET:
         logger.warning("CLUSTER_SECRET is the default value - fine for local dev only")
     logger.info(
-        "Node %s starting on %s:%d (capacity=%d keys, cleanup every %ss)",
+        "Node %s starting on %s:%d (capacity=%d keys, cleanup every %ss, "
+        "replication timeout %ss, %d retries)",
         settings.node_id,
         settings.host,
         settings.port,
         settings.capacity,
         settings.ttl_cleanup_interval,
+        settings.replication_timeout,
+        settings.replication_retries,
     )
     try:
         yield
     finally:
+        # Let in-flight replications finish (or be recorded as failed) BEFORE
+        # closing the HTTP client they use.
+        await app.state.replication.close()
+        await http.aclose()
         await cleaner.stop()
         logger.info("Node %s shut down", settings.node_id)
 
@@ -51,7 +69,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title=f"Distributed Cache - Node {settings.node_id}",
     description="Internal API of a single cache node. Not meant for public exposure.",
-    version="0.2.0",
+    version="0.6.0",
     lifespan=lifespan,
 )
 app.include_router(internal_routes.router)

@@ -32,7 +32,11 @@ class CacheSetResponse(BaseModel):
     version: int
     expires_at: float | None
     ttl_seconds: float | None
-    node_id: str
+    node_id: str  # the primary that stored the key
+    replicas: list[str]  # nodes the primary was told to replicate to
+    # "async": replicas receive the write shortly AFTER this response (eventual
+    # consistency). "none": replication factor is 1.
+    replication: Literal["none", "async"]
 
 
 class CacheGetResponse(BaseModel):
@@ -48,6 +52,8 @@ class CacheDeleteResponse(BaseModel):
     key: str
     deleted: bool
     node_id: str
+    replicas: list[str]
+    replication: Literal["none", "async"]
 
 
 class CacheExistsResponse(BaseModel):

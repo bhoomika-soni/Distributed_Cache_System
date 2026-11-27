@@ -18,6 +18,8 @@ os.environ["NODE_ID"] = "test-node"
 os.environ["CLUSTER_SECRET"] = "test-secret"
 os.environ["CACHE_CAPACITY"] = "3"
 os.environ["TTL_CLEANUP_INTERVAL"] = "0.05"
+os.environ["REPLICATION_TIMEOUT"] = "0.3"  # fail fast when a replica is unreachable
+os.environ["REPLICATION_RETRIES"] = "1"
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "cache_node"))
 

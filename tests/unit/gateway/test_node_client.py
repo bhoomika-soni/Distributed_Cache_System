@@ -137,3 +137,38 @@ def test_non_json_success_body_is_a_response_error():
     result, _ = run_client(lambda r, n: httpx.Response(200, text="<html>oops</html>"),
                            lambda c: c.exists(NODE, "k"))
     assert isinstance(result, nc.NodeResponseError)
+
+
+# ------------------------------------------------------- replica list (Phase 6)
+REPLICAS = [SimpleNamespace(node_id="node-2", url="http://node-2"),
+            SimpleNamespace(node_id="node-3", url="http://node-3")]
+WIRE_REPLICAS = [{"node_id": "node-2", "url": "http://node-2"},
+                 {"node_id": "node-3", "url": "http://node-3"}]
+
+
+def test_set_sends_the_replica_list_to_the_primary():
+    import json
+    _, attempts = run_client(lambda r, n: httpx.Response(200, json={}),
+                             lambda c: c.set(NODE, "k", {"a": 1}, 30, REPLICAS))
+    assert json.loads(attempts[0].content) == {
+        "key": "k", "value": {"a": 1}, "ttl": 30, "replicas": WIRE_REPLICAS,
+    }
+
+
+def test_set_without_replicas_sends_an_empty_list():
+    import json
+    _, attempts = run_client(lambda r, n: httpx.Response(200, json={}),
+                             lambda c: c.set(NODE, "k", 1, None))
+    assert json.loads(attempts[0].content)["replicas"] == []
+
+
+def test_delete_sends_a_body_only_when_there_are_replicas():
+    import json
+    _, with_replicas = run_client(lambda r, n: httpx.Response(200, json={}),
+                                  lambda c: c.delete(NODE, "k", REPLICAS))
+    assert with_replicas[0].method == "DELETE"
+    assert json.loads(with_replicas[0].content) == {"replicas": WIRE_REPLICAS}
+
+    _, without = run_client(lambda r, n: httpx.Response(200, json={}),
+                            lambda c: c.delete(NODE, "k"))
+    assert without[0].content == b""
