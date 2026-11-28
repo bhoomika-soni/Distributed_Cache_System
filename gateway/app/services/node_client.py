@@ -104,6 +104,29 @@ class NodeClient:
         resp = await self._send(node, "GET", f"/internal/cache/ttl/{_enc(key)}", idempotent=True)
         return self._ok_json(node, resp)
 
+    # ------------------------------------------ health checks and recovery
+    async def probe(self, node: NodeInfo) -> dict:
+        """One health check: a single attempt, no retries. The health monitor's
+        thresholds (N failures in a row) ARE the retry policy here."""
+        try:
+            resp = await self._http.get(node.url + "/internal/health", headers=self._headers)
+        except httpx.TransportError as exc:
+            self._raise_unavailable(node, exc, 1)
+        return self._ok_json(node, resp)
+
+    async def snapshot(self, node: NodeInfo) -> dict:
+        """Every live entry of a node (used to re-sync a restarted node)."""
+        resp = await self._send(node, "GET", "/internal/cache/snapshot", idempotent=True)
+        return self._ok_json(node, resp)
+
+    async def apply(self, node: NodeInfo, payload: dict) -> dict:
+        """Send one write to a node's replication endpoint. Safe to retry: the node
+        applies it only if the version is newer than what it holds."""
+        resp = await self._send(
+            node, "POST", "/internal/replication/apply", idempotent=True, json=payload
+        )
+        return self._ok_json(node, resp)
+
     # --------------------------------------------------------------- plumbing
     async def _send(
         self, node: NodeInfo, method: str, path: str, *, idempotent: bool, json: Any = None

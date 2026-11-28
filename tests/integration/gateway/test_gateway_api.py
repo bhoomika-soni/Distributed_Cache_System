@@ -26,7 +26,7 @@ def test_cluster_endpoints_list_the_registered_nodes(client, cluster):
     nodes = client.get("/cluster/nodes").json()
     assert [n["node_id"] for n in nodes] == ["node-1", "node-2"]
     assert nodes[0]["url"] == cluster.node_urls["node-1"]
-    assert all(n["status"] == "unknown" for n in nodes)  # honest: no health checks yet
+    assert all(n["status"] in ("unknown", "healthy") for n in nodes)  # probed at startup
 
     assert client.get("/cluster/nodes/node-2").json()["node_id"] == "node-2"
     assert client.get("/cluster/nodes/node-9").status_code == 404

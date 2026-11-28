@@ -23,7 +23,8 @@ DEAD = "node-3"
 
 @pytest.fixture(scope="module")
 def cluster():
-    with running_cluster(node_count=3, replication_factor=3) as c:
+    # health tracking off: this module tests replication bookkeeping, not failover
+    with running_cluster(node_count=3, replication_factor=3, health_check_interval=3600) as c:
         c.node_services[DEAD].stop()  # simulate a crash
         yield c
 

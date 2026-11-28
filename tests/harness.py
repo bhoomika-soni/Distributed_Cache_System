@@ -44,6 +44,18 @@ def load_module_from_file(name: str, path: Path):
     return module
 
 
+def load_package(name: str, directory: Path):
+    """Import a directory as a package called `name` (relative imports inside it work).
+    Used to test gateway/app/services without importing the clashing top-level `app`."""
+    spec = importlib.util.spec_from_file_location(
+        name, directory / "__init__.py", submodule_search_locations=[str(directory)]
+    )
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 class Service:
     """A `python -m app.main` child process with its output captured for debugging."""
 
@@ -93,8 +105,8 @@ class Running:
 
 
 @contextmanager
-def run_node(node_id: str, secret: str = SECRET, capacity: int = 1000):
-    port = free_port()
+def run_node(node_id: str, secret: str = SECRET, capacity: int = 1000, port: int | None = None):
+    port = port or free_port()
     svc = Service(node_id, ROOT / "cache_node", {
         "NODE_ID": node_id, "NODE_HOST": LOCALHOST, "NODE_PORT": str(port),
         "CLUSTER_SECRET": secret, "CACHE_CAPACITY": str(capacity),
@@ -117,6 +129,9 @@ def run_gateway(
     request_timeout: float = 2.0,
     max_retries: int = 2,
     replication_factor: int = 1,
+    health_check_interval: float = 0.3,  # fast, so tests see failures within about a second
+    failure_threshold: int = 2,
+    recovery_threshold: int = 2,
 ):
     port = free_port()
     svc = Service("gateway", ROOT / "gateway", {
@@ -124,6 +139,9 @@ def run_gateway(
         "NODES": ",".join(f"{i}={u}" for i, u in nodes.items()),
         "CLUSTER_SECRET": secret, "REPLICATION_FACTOR": str(replication_factor),
         "REQUEST_TIMEOUT": str(request_timeout), "MAX_RETRIES": str(max_retries),
+        "HEALTH_CHECK_INTERVAL": str(health_check_interval),
+        "FAILURE_THRESHOLD": str(failure_threshold),
+        "RECOVERY_THRESHOLD": str(recovery_threshold),
     })
     try:
         url = f"http://{LOCALHOST}:{port}"
@@ -137,12 +155,25 @@ def run_gateway(
 class Cluster:
     gateway_url: str
     node_urls: dict[str, str]
-    node_services: dict[str, Service]  # so a test can stop() a node to simulate a crash
+    node_services: dict[str, Service]
+    _stack: ExitStack
+
+    def stop_node(self, node_id: str) -> None:
+        """Kill a node process (a crash: its memory is gone)."""
+        self.node_services[node_id].stop()
+
+    def restart_node(self, node_id: str) -> None:
+        """Start a FRESH (empty) node on the same address as the stopped one."""
+        self.node_services[node_id].stop()  # harmless if already stopped
+        port = int(self.node_urls[node_id].rsplit(":", 1)[1])
+        node = self._stack.enter_context(run_node(node_id, port=port))
+        self.node_services[node_id] = node.service
 
 
 @contextmanager
-def running_cluster(node_count: int = 2, replication_factor: int = 1):
-    """N real cache nodes plus one gateway in front of them."""
+def running_cluster(node_count: int = 2, replication_factor: int = 1, **gateway_kwargs):
+    """N real cache nodes plus one gateway in front of them.
+    Extra keyword arguments are passed to run_gateway()."""
     with ExitStack() as stack:
         node_urls, node_services = {}, {}
         for i in range(1, node_count + 1):
@@ -150,9 +181,9 @@ def running_cluster(node_count: int = 2, replication_factor: int = 1):
             node_urls[f"node-{i}"] = node.url
             node_services[f"node-{i}"] = node.service
         gateway = stack.enter_context(
-            run_gateway(node_urls, replication_factor=replication_factor)
+            run_gateway(node_urls, replication_factor=replication_factor, **gateway_kwargs)
         )
-        yield Cluster(gateway.url, node_urls, node_services)
+        yield Cluster(gateway.url, node_urls, node_services, stack)
 
 
 class HangingServer:

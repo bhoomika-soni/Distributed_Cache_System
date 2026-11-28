@@ -293,3 +293,23 @@ def test_apply_counts_what_it_received_and_never_forwards(client):
 )
 def test_malformed_replication_messages_are_422(client, payload):
     assert client.post("/internal/replication/apply", json=payload).status_code == 422
+
+
+# ------------------------------------------------------------------ snapshot
+def test_snapshot_lists_live_entries_with_versions_and_absolute_expiry(client):
+    client.post("/internal/cache/set", json={"key": "a", "value": 1})
+    client.post("/internal/cache/set", json={"key": "a", "value": 2})  # version 2
+    client.post("/internal/cache/set", json={"key": "b", "value": {"x": 1}, "ttl": 100})
+    client.post("/internal/cache/set", json={"key": "gone", "value": 1})
+    client.delete("/internal/cache/delete/gone")
+
+    body = client.get("/internal/cache/snapshot").json()
+    entries = {e["key"]: e for e in body["entries"]}
+    assert body["count"] == 2 and set(entries) == {"a", "b"}  # deleted keys are not included
+    assert entries["a"]["version"] == 2 and entries["a"]["value"] == 2
+    assert entries["a"]["expires_at"] is None and entries["b"]["expires_at"] is not None
+
+
+def test_snapshot_requires_the_cluster_secret(client):
+    r = client.get("/internal/cache/snapshot", headers={"X-Cluster-Secret": "wrong"})
+    assert r.status_code == 401

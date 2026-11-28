@@ -27,6 +27,8 @@ from app.schemas import (
     GetResponse,
     SetRequest,
     SetResponse,
+    SnapshotEntry,
+    SnapshotResponse,
     TTLResponse,
 )
 from app.security import require_cluster_secret
@@ -186,3 +188,28 @@ async def replication_stats(
 ) -> dict:
     """Replication counters and recent failures. (Phase 8 folds these into /internal/metrics.)"""
     return {**replication.snapshot(), "tombstones": len(engine.versions)}
+
+
+# ------------------------------------------------------------------- recovery
+@router.get("/cache/snapshot", response_model=SnapshotResponse)
+async def snapshot(engine: CacheEngine = Depends(get_engine)) -> SnapshotResponse:
+    """Every live entry on this node, with its version and absolute expiry.
+
+    The gateway's recovery service reads this from healthy peers to re-sync a
+    node that restarted empty. The whole store is returned at once, which is
+    fine for the capacity this project targets (thousands of keys)."""
+    entries = engine.live_entries()
+    return SnapshotResponse(
+        node_id=settings.node_id,
+        count=len(entries),
+        entries=[
+            SnapshotEntry(
+                key=e.key,
+                value=e.value,
+                version=e.version,
+                created_at=e.created_at,
+                expires_at=e.expires_at,
+            )
+            for e in entries
+        ],
+    )

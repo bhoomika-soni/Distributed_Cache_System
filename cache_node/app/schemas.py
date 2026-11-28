@@ -111,3 +111,17 @@ class ApplyResponse(BaseModel):
     applied: bool
     reason: Literal["applied", "stale", "expired"]
     version: int
+
+
+class SnapshotEntry(BaseModel):
+    key: str
+    value: Any
+    version: int
+    created_at: float
+    expires_at: float | None  # absolute expiry, so the receiver does not restart the TTL
+
+
+class SnapshotResponse(BaseModel):
+    node_id: str
+    count: int
+    entries: list[SnapshotEntry]

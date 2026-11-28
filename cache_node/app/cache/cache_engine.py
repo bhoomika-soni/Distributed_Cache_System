@@ -271,6 +271,13 @@ class CacheEngine:
         self.versions.purge()
         return removed
 
+    def live_entries(self) -> list[CacheEntry]:
+        """All live (non-expired) entries, for re-syncing a restarted peer.
+
+        Read-only: does not change LRU order or any statistics."""
+        now = self._clock()
+        return [e for e in self._store.snapshot() if not e.is_expired(now)]
+
     def size(self) -> int:
         """Entries currently stored. May include expired ones not yet purged."""
         return len(self._store)

@@ -56,6 +56,8 @@ class Settings:
     health_check_interval: float  # seconds between health probes
     request_timeout: float  # seconds, per gateway -> node request
     max_retries: int  # extra attempts after the first one (kept small on purpose)
+    failure_threshold: int  # consecutive failures before a node is marked unhealthy
+    recovery_threshold: int  # consecutive successful probes before a node starts recovering
 
 
 def load_settings() -> Settings:
@@ -71,6 +73,8 @@ def load_settings() -> Settings:
         health_check_interval=float(os.getenv("HEALTH_CHECK_INTERVAL", "5")),
         request_timeout=float(os.getenv("REQUEST_TIMEOUT", "2.0")),
         max_retries=int(os.getenv("MAX_RETRIES", "2")),
+        failure_threshold=int(os.getenv("FAILURE_THRESHOLD", "2")),
+        recovery_threshold=int(os.getenv("RECOVERY_THRESHOLD", "2")),
     )
 
     if not 1 <= settings.port <= 65535:
@@ -88,5 +92,9 @@ def load_settings() -> Settings:
         raise ValueError("HEALTH_CHECK_INTERVAL and REQUEST_TIMEOUT must be > 0")
     if settings.max_retries < 0:
         raise ValueError("MAX_RETRIES must be >= 0")
+    if settings.failure_threshold < 1 or settings.recovery_threshold < 1:
+        raise ValueError("FAILURE_THRESHOLD and RECOVERY_THRESHOLD must be >= 1")
     return settings
+
+
 settings = load_settings()

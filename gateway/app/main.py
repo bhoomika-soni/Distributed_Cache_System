@@ -12,7 +12,8 @@ from fastapi.responses import JSONResponse
 
 from app.config import DEFAULT_SECRET, settings
 from app.routes import cache_routes, cluster_routes, health_routes
-from app.services.cache_service import CacheService
+from app.services.cache_service import CacheService, NoAvailableNodesError
+from app.services.health_monitor import HealthMonitor
 from app.services.node_client import (
     NodeClient,
     NodeResponseError,
@@ -21,6 +22,7 @@ from app.services.node_client import (
 )
 from app.services.node_manager import NodeManager
 from app.services.node_router import NodeRouter
+from app.services.recovery_service import RecoveryService
 
 logging.basicConfig(
     level=logging.INFO,
@@ -31,7 +33,7 @@ logger = logging.getLogger("gateway")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Build the gateway's objects on startup and close the HTTP client on shutdown."""
+    """Build the gateway's objects, start health monitoring, and shut it all down in order."""
     app.state.started_at = time.time()
     if settings.cluster_secret == DEFAULT_SECRET:
         logger.warning("CLUSTER_SECRET is the default value - fine for local dev only")
@@ -42,22 +44,36 @@ async def lifespan(app: FastAPI):
         timeout=settings.request_timeout,
         limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
     )
-    node_manager = NodeManager(settings.nodes)
+    node_manager = NodeManager(
+        settings.nodes,
+        failure_threshold=settings.failure_threshold,
+        recovery_threshold=settings.recovery_threshold,
+    )
     node_client = NodeClient(http, settings.cluster_secret, settings.max_retries)
-    app.state.node_manager = node_manager
     router = NodeRouter(node_manager, settings.virtual_nodes, settings.replication_factor)
-    app.state.cache_service = CacheService(router, node_client)
+    recovery = RecoveryService(node_manager, router, node_client)
+    monitor = HealthMonitor(node_manager, node_client, recovery, settings.health_check_interval)
+
+    app.state.node_manager = node_manager
+    app.state.cache_service = CacheService(router, node_client, node_manager)
+    app.state.health_monitor = monitor
+    app.state.recovery = recovery
 
     logger.info(
         "Gateway starting on %s:%d with %d configured node(s): %s "
-        "(hash ring: %d points, replication factor %d)",
+        "(hash ring: %d points, replication factor %d, health check every %ss, "
+        "unhealthy after %d failures, recovering after %d good probes)",
         settings.host, settings.port, len(node_manager),
         ", ".join(n.node_id for n in node_manager.all()), len(router.ring),
-        settings.replication_factor,
+        settings.replication_factor, settings.health_check_interval,
+        settings.failure_threshold, settings.recovery_threshold,
     )
+    monitor.start()  # first probe of every node happens immediately
     try:
         yield
     finally:
+        await monitor.stop()
+        await recovery.stop()
         await http.aclose()
         logger.info("Gateway shut down")
 
@@ -65,7 +81,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Distributed Cache - Gateway",
     description="Public API for the distributed in-memory cache cluster.",
-    version="0.4.0",
+    version="0.7.0",
     lifespan=lifespan,
 )
 app.include_router(health_routes.router)
@@ -74,7 +90,13 @@ app.include_router(cluster_routes.router)
 
 
 # ---- Node failures -> HTTP status codes (the client sees a clear, honest error)
-# 503: node unreachable   504: node too slow   502: node answered with garbage/401/5xx
+# 503: node unreachable / none usable   504: node too slow   502: node answered with garbage/401/5xx
+@app.exception_handler(NoAvailableNodesError)
+async def no_nodes_handler(request: Request, exc: NoAvailableNodesError) -> JSONResponse:
+    logger.warning("%s", exc)
+    return JSONResponse(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, content={"detail": str(exc)})
+
+
 @app.exception_handler(NodeTimeoutError)
 async def node_timeout_handler(request: Request, exc: NodeTimeoutError) -> JSONResponse:
     logger.warning("%s", exc)

@@ -37,6 +37,7 @@ class CacheSetResponse(BaseModel):
     # "async": replicas receive the write shortly AFTER this response (eventual
     # consistency). "none": replication factor is 1.
     replication: Literal["none", "async"]
+    fallback: bool  # True if a node other than the key's normal primary served this
 
 
 class CacheGetResponse(BaseModel):
@@ -46,6 +47,7 @@ class CacheGetResponse(BaseModel):
     expires_at: float | None
     ttl_seconds: float | None
     node_id: str
+    fallback: bool  # True if a node other than the key's normal primary served this
 
 
 class CacheDeleteResponse(BaseModel):
@@ -54,12 +56,14 @@ class CacheDeleteResponse(BaseModel):
     node_id: str
     replicas: list[str]
     replication: Literal["none", "async"]
+    fallback: bool  # True if a node other than the key's normal primary served this
 
 
 class CacheExistsResponse(BaseModel):
     key: str
     exists: bool
     node_id: str
+    fallback: bool  # True if a node other than the key's normal primary served this
 
 
 class CacheTTLResponse(BaseModel):
@@ -67,3 +71,4 @@ class CacheTTLResponse(BaseModel):
     state: Literal["missing", "no_expiry", "expiring"]
     ttl_seconds: float | None
     node_id: str
+    fallback: bool  # True if a node other than the key's normal primary served this
